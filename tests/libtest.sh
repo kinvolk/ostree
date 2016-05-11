@@ -29,6 +29,16 @@ else
   test_builddir=$(dirname $0)
 fi
 
+# We need to get the real path in order to use valgrind
+if test -n "${OT_TESTS_UNINSTALLED:-}"; then
+    OSTREE=$(cd ${OT_TESTS_UNINSTALLED} && libtool --mode=execute echo ostree)
+    echo "uninstalled ostree=${OSTREE}"
+else
+    OSTREE=ostree
+    echo "installed ostree"
+fi
+export OSTREE
+
 assert_not_reached () {
     echo $@ 1>&2; exit 1
 }
@@ -77,10 +87,12 @@ if test -n "${OT_TESTS_DEBUG:-}"; then
 fi
 
 if test -n "${OT_TESTS_VALGRIND:-}"; then
-    CMD_PREFIX="env G_SLICE=always-malloc valgrind -q --leak-check=full --num-callers=30 --suppressions=${test_srcdir}/ostree-valgrind.supp"
+    CMD_PREFIX="env G_SLICE=always-malloc valgrind -q --leak-check=full --num-callers=30 --suppressions=${test_srcdir}/glib.supp --suppressions=${test_srcdir}/ostree.supp"
 else
     CMD_PREFIX="env LD_PRELOAD=${test_builddir}/libreaddir-rand.so"
 fi
+
+export OSTREE="${CMD_PREFIX} ${OSTREE}"
 
 assert_streq () {
     test "$1" = "$2" || (echo 1>&2 "$1 != $2"; exit 1)
@@ -173,7 +185,7 @@ setup_test_repository () {
     mkdir repo
     cd repo
     ot_repo="--repo=`pwd`"
-    export OSTREE="${CMD_PREFIX} ostree ${ot_repo}"
+    export OSTREE="${OSTREE} ${ot_repo}"
     if test -n "$mode"; then
 	$OSTREE init --mode=${mode}
     else
