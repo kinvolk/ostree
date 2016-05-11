@@ -32,10 +32,8 @@ fi
 # We need to get the real path in order to use valgrind
 if test -n "${OT_TESTS_UNINSTALLED:-}"; then
     OSTREE=$(cd ${OT_TESTS_UNINSTALLED} && libtool --mode=execute echo ostree)
-    echo "uninstalled ostree=${OSTREE}"
 else
     OSTREE=ostree
-    echo "installed ostree"
 fi
 export OSTREE
 
