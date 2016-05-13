@@ -23,11 +23,12 @@ include $(top_srcdir)/buildutil/glib-tap.mk
 # include the builddir in $PATH so we find our just-built ostree
 # binary.
 TESTS_ENVIRONMENT += OT_TESTS_DEBUG=1 \
-	OT_TESTS_UNINSTALLED=$$(cd $(top_builddir) && pwd) \
-	GI_TYPELIB_PATH=$${OT_TESTS_UNINSTALLED} \
+	GI_TYPELIB_PATH=$$(cd $(top_builddir) && pwd) \
 	LD_LIBRARY_PATH=$$(cd $(top_builddir)/.libs && pwd) \
-	PATH=$$(cd $(top_builddir) && pwd):$${PATH} \
+	PATH=$$(cd $(top_builddir)/tests && pwd):$${PATH} \
 	$(NULL)
+
+uninstalled_test_data = tests/ostree-symlink-stamp
 
 uninstalled_test_scripts = tests/test-symbols.sh
 
@@ -229,7 +230,12 @@ EXTRA_DIST += \
 tests/libreaddir-rand.so: Makefile
 	$(AM_V_GEN) ln -fns ../.libs/libreaddir-rand.so tests
 ALL_LOCAL_RULES += tests/libreaddir-rand.so
-CLEANFILES += tests/libreaddir-rand.so
+CLEANFILES += tests/libreaddir-rand.so tests/ostree-symlink-stamp tests/ostree
+
+tests/ostree-symlink-stamp:
+	@real_bin=`cd $(top_builddir) && libtool --mode=execute echo ostree`; \
+	ln -sf "$${real_bin}" tests/ostree; \
+	touch $@
 
 # Unfortunately the glib test data APIs don't actually handle
 # non-recursive Automake, so we change our code to canonically look

@@ -29,14 +29,6 @@ else
   test_builddir=$(dirname $0)
 fi
 
-# We need to get the real path in order to use valgrind
-if test -n "${OT_TESTS_UNINSTALLED:-}"; then
-    OSTREE=$(cd ${OT_TESTS_UNINSTALLED} && libtool --mode=execute echo ostree)
-else
-    OSTREE=ostree
-fi
-export OSTREE
-
 assert_not_reached () {
     echo $@ 1>&2; exit 1
 }
@@ -89,8 +81,6 @@ if test -n "${OT_TESTS_VALGRIND:-}"; then
 else
     CMD_PREFIX="env LD_PRELOAD=${test_builddir}/libreaddir-rand.so"
 fi
-
-export OSTREE="${CMD_PREFIX} ${OSTREE}"
 
 assert_streq () {
     test "$1" = "$2" || (echo 1>&2 "$1 != $2"; exit 1)
@@ -183,7 +173,7 @@ setup_test_repository () {
     mkdir repo
     cd repo
     ot_repo="--repo=`pwd`"
-    export OSTREE="${OSTREE} ${ot_repo}"
+    export OSTREE="${CMD_PREFIX} ostree ${ot_repo}"
     if test -n "$mode"; then
 	$OSTREE init --mode=${mode}
     else
@@ -251,8 +241,6 @@ setup_fake_remote_repo1() {
     port=$(cat ${test_tmpdir}/httpd-port)
     echo "http://127.0.0.1:${port}" > ${test_tmpdir}/httpd-address
     cd ${oldpwd} 
-
-    export OSTREE="${CMD_PREFIX} ostree --repo=repo"
 }
 
 setup_os_boot_syslinux() {
