@@ -2441,8 +2441,9 @@ _ostree_repo_read_commit_compat_sizes (OstreeRepo      *self,
   gs_unref_variant GVariant *ret_sizes = NULL;
   GError *temp_error = NULL;
 
-  if (!ot_util_variant_map (sizes_path, _OSTREE_COMPAT_SIZES_TYPE,
-                            TRUE, &ret_sizes, &temp_error))
+  if (!ot_util_variant_map_at (AT_FDCWD, gs_file_get_path_cached (sizes_path),
+                               _OSTREE_COMPAT_SIZES_TYPE,
+                               TRUE, &ret_sizes, &temp_error))
     {
       if (g_error_matches (temp_error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
         {
