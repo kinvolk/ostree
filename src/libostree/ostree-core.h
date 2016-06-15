@@ -242,6 +242,12 @@ void ostree_object_from_string (const char *str,
                                 gchar     **out_checksum,
                                 OstreeObjectType *out_objtype);
 
+_OSTREE_PUBLIC
+char *
+ostree_get_relative_object_path (const char        *checksum,
+                                 OstreeObjectType   type,
+                                 gboolean           compressed);
+
 _OSTREE_PUBLIC gboolean
 ostree_content_stream_parse (gboolean                compressed,
                              GInputStream           *input,

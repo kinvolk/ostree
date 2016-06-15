@@ -1491,8 +1491,8 @@ _ostree_loose_path_with_extension (char        *buf,
             checksum + 2, extension);
 }
 
-/*
- * _ostree_get_relative_object_path:
+/**
+ * ostree_get_relative_object_path:
  * @checksum: ASCII checksum string
  * @type: Object type
  * @compressed: Whether or not the repository object is compressed
@@ -1500,9 +1500,9 @@ _ostree_loose_path_with_extension (char        *buf,
  * Returns: (transfer full): Relative path for a loose object
  */
 char *
-_ostree_get_relative_object_path (const char         *checksum,
-                                  OstreeObjectType    type,
-                                  gboolean            compressed)
+ostree_get_relative_object_path (const char         *checksum,
+                                 OstreeObjectType    type,
+                                 gboolean            compressed)
 {
   GString *path;
 
