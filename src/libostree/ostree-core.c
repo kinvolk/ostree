@@ -103,6 +103,8 @@ ostree_validate_checksum_string (const char *sha256,
 #define OSTREE_REF_REGEXP "(?:" OSTREE_REF_FRAGMENT_REGEXP "/)*" OSTREE_REF_FRAGMENT_REGEXP
 #define OSTREE_REMOTE_NAME_REGEXP OSTREE_REF_FRAGMENT_REGEXP
 
+#define OSTREE_COLLECTION_ID_REGEXP OSTREE_REF_REGEXP
+
 /**
  * ostree_parse_refspec:
  * @refspec: A "refspec" string
@@ -206,6 +208,34 @@ ostree_validate_remote_name (const char  *remote_name,
 
   if (!g_regex_match (regex, remote_name, 0, &match))
     return glnx_throw (error, "Invalid remote name %s", remote_name);
+
+  return TRUE;
+}
+
+/**
+ * ostree_validate_collection_id:
+ * @rev: (nullable): A collection ID
+ * @error: Error
+ *
+ * Returns: %TRUE if @collection_id is a valid collection ID, %FALSE if it is invalid
+ *    or %NULL
+ */
+gboolean
+ostree_validate_collection_id (const char *collection_id, GError **error)
+{
+  g_autoptr(GMatchInfo) match = NULL;
+
+  static gsize regex_initialized;
+  static GRegex *regex;
+  if (g_once_init_enter (&regex_initialized))
+    {
+      regex = g_regex_new ("^" OSTREE_COLLECTION_ID_REGEXP "$", 0, 0, NULL);
+      g_assert (regex);
+      g_once_init_leave (&regex_initialized, 1);
+    }
+
+  if (collection_id == NULL || !g_regex_match (regex, collection_id, 0, &match))
+    return glnx_throw (error, "Invalid collection ID %s", collection_id);
 
   return TRUE;
 }
