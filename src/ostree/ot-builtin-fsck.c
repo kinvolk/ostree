@@ -246,7 +246,10 @@ ostree_builtin_fsck (int argc, char **argv, GCancellable *cancellable, GError **
   gpointer key, value;
   gboolean found_corruption = FALSE;
   guint n_partial = 0;
-  g_autoptr(GHashTable) all_refs = NULL;
+  g_autoptr(GHashTable) all_refs = NULL;  /* (element-type utf8 utf8) */
+#ifdef OSTREE_ENABLE_EXPERIMENTAL_API
+  g_autoptr(GHashTable) all_collection_refs = NULL;  /* (element-type OstreeCollectionRef utf8) */
+#endif  /* OSTREE_ENABLE_EXPERIMENTAL_API */
   g_autoptr(GHashTable) objects = NULL;
   g_autoptr(GHashTable) commits = NULL;
   g_autoptr(GPtrArray) tombstones = NULL;
@@ -275,6 +278,29 @@ ostree_builtin_fsck (int argc, char **argv, GCancellable *cancellable, GError **
           goto out;
         }
     }
+
+#ifdef OSTREE_ENABLE_EXPERIMENTAL_API
+  if (!opt_quiet)
+    g_print ("Validating refs in collections...\n");
+
+  if (!ostree_repo_list_collection_refs (repo, NULL, &all_collection_refs,
+                                         cancellable, error))
+    return FALSE;
+  g_hash_table_iter_init (&hash_iter, all_collection_refs);
+  while (g_hash_table_iter_next (&hash_iter, &key, &value))
+    {
+      const OstreeCollectionRef *ref = key;
+      const char *checksum = value;
+      g_autoptr(GVariant) commit = NULL;
+      if (!ostree_repo_load_variant (repo, OSTREE_OBJECT_TYPE_COMMIT,
+                                     checksum, &commit, error))
+        {
+          g_prefix_error (error, "Loading commit for ref (%s, %s): ",
+                          ref->collection_id, ref->ref_name);
+          goto out;
+        }
+    }
+#endif  /* OSTREE_ENABLE_EXPERIMENTAL_API */
 
   if (!opt_quiet)
     g_print ("Enumerating objects...\n");
