@@ -55,6 +55,7 @@ static char *opt_gpg_homedir;
 static gboolean opt_generate_sizes;
 static gboolean opt_disable_fsync;
 static char *opt_timestamp;
+static char *opt_collection_id;
 
 static gboolean
 parse_fsync_cb (const char  *option_name,
@@ -78,6 +79,7 @@ static GOptionEntry options[] = {
   { "body", 'm', 0, G_OPTION_ARG_STRING, &opt_body, "Full description", "BODY" },
   { "body-file", 'F', 0, G_OPTION_ARG_FILENAME, &opt_body_file, "Commit message from FILE path", "FILE" },
   { "editor", 'e', 0, G_OPTION_ARG_NONE, &opt_editor, "Use an editor to write the commit message", NULL },
+  { "collection-id", 'c', 0, G_OPTION_ARG_STRING, &opt_collection_id, "Collection ID", "ID" },
   { "branch", 'b', 0, G_OPTION_ARG_STRING, &opt_branch, "Branch", "BRANCH" },
   { "orphan", 0, 0, G_OPTION_ARG_NONE, &opt_orphan, "Create a commit without writing a ref", NULL },
   { "tree", 0, 0, G_OPTION_ARG_STRING_ARRAY, &opt_trees, "Overlay the given argument as a tree", "dir=PATH or tar=TARFILE or ref=COMMIT" },
@@ -326,6 +328,126 @@ parse_keyvalue_strings (char             **strings,
   g_variant_ref_sink (*out_metadata);
  out:
   return ret;
+}
+
+static gboolean
+get_signed_collection_ref_tuple (OstreeRepo         *repo,
+                                 const char         *commit_checksum,
+                                 guint64             timestamp,
+                                 const char         *collection_id,
+                                 const char         *ref,
+                                 const char *const  *key_ids,
+                                 GVariant          **out_collection_ref_tuple,
+                                 GVariant          **out_collection_ref_tuple_sigs,
+                                 GCancellable       *cancellable,
+                                 GError            **error)
+{
+  g_autoptr(GVariant) collection_ref_tuple = NULL;
+  g_autoptr(GBytes) collection_ref_tuple_data = NULL;
+  g_autoptr(GVariantBuilder) signature_builder = NULL;
+  const char *const *key_id_iter;
+
+  g_assert_nonnull (out_collection_ref_tuple);
+  g_assert_nonnull (out_collection_ref_tuple_sigs);
+  g_assert_nonnull (key_ids);
+
+  collection_ref_tuple = g_variant_new ("(stss)",
+                                        commit_checksum,
+                                        GUINT64_TO_BE (timestamp),
+                                        collection_id,
+                                        ref);
+  collection_ref_tuple_data = g_variant_get_data_as_bytes (collection_ref_tuple);
+  signature_builder = g_variant_builder_new (G_VARIANT_TYPE ("aay"));
+
+  for (key_id_iter = key_ids; *key_id_iter; key_id_iter++)
+    {
+      const char *keyid = *key_id_iter;
+      g_autoptr(GBytes) signature_bytes = NULL;
+
+      if (!ostree_repo_sign_data (repo,
+                                  collection_ref_tuple_data,
+                                  keyid,
+                                  opt_gpg_homedir,
+                                  &signature_bytes,
+                                  cancellable,
+                                  error))
+        return FALSE;
+      g_variant_builder_add (signature_builder, "@ay",
+                             ot_gvariant_new_ay_bytes (signature_bytes));
+    }
+
+  *out_collection_ref_tuple = g_steal_pointer (&collection_ref_tuple);
+  *out_collection_ref_tuple_sigs = g_variant_builder_end (signature_builder);
+
+  return TRUE;
+}
+
+static gboolean
+fill_collection_id (OstreeRepo    *repo,
+                    const char    *commit_checksum,
+                    guint64        timestamp,
+                    GVariant      *detached_metadata,
+                    GVariant     **out_detached_metadata,
+                    GCancellable  *cancellable,
+                    GError       **error)
+{
+  g_autoptr(GVariant) collection_ref_tuple = NULL;
+  g_autoptr(GVariant) collection_ref_tuple_sigs = NULL;
+  const char *collection_id;
+  const char *repo_collection_id;
+  g_autoptr(GVariantBuilder) builder = NULL;
+
+  if (opt_orphan)
+    {
+      if (opt_collection_id)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                       "Can't use --collection-id together with --orphan");
+          return FALSE;
+        }
+      *out_detached_metadata = detached_metadata;
+      return TRUE;
+    }
+
+  g_assert_nonnull (opt_branch);
+
+  collection_id = opt_collection_id;
+  repo_collection_id = ostree_repo_get_collection_id (repo);
+  if (collection_id == NULL)
+    {
+      collection_id = repo_collection_id;
+    }
+  else if (g_strcmp0 (collection_id, repo_collection_id) != 0)
+    {
+      g_printerr ("Creating commit with different collection ID (%s) than the repo's one (%s)\n", collection_id, repo_collection_id);
+    }
+  if (collection_id == NULL || opt_key_ids == NULL)
+    {
+      *out_detached_metadata = detached_metadata;
+      return TRUE;
+    }
+
+  if (!get_signed_collection_ref_tuple (repo,
+                                        commit_checksum,
+                                        timestamp,
+                                        collection_id,
+                                        opt_branch,
+                                        (const char *const *) opt_key_ids,
+                                        &collection_ref_tuple,
+                                        &collection_ref_tuple_sigs,
+                                        cancellable,
+                                        error))
+    return FALSE;
+
+  builder = ot_util_variant_builder_from_variant (detached_metadata,
+                                                  G_VARIANT_TYPE_VARDICT);
+  g_variant_builder_add (builder, "{sv}", "ostree.commit.collection-ref",
+                         g_variant_new_variant (g_steal_pointer (&collection_ref_tuple)));
+  g_variant_builder_add (builder, "{sv}", "ostree.commit.collection-ref-sigs",
+                         g_variant_new_variant (g_steal_pointer (&collection_ref_tuple_sigs)));
+
+  *out_detached_metadata = g_variant_builder_end (builder);
+  return TRUE;
 }
 
 gboolean
@@ -582,6 +704,7 @@ ostree_builtin_commit (int argc, char **argv, GCancellable *cancellable, GError 
     {
       gboolean update_summary;
       guint64 timestamp;
+      g_autoptr(GVariant) old_detached_metadata = NULL;
       if (!opt_timestamp)
         {
           GDateTime *now = g_date_time_new_now_utc ();
@@ -610,6 +733,16 @@ ostree_builtin_commit (int argc, char **argv, GCancellable *cancellable, GError 
                                                    &commit_checksum, cancellable, error))
             goto out;
         }
+
+      old_detached_metadata = g_steal_pointer (&detached_metadata);
+      if (!fill_collection_id (repo,
+                               commit_checksum,
+                               timestamp,
+                               old_detached_metadata,
+                               &detached_metadata,
+                               cancellable,
+                               error))
+        goto out;
 
       if (detached_metadata)
         {
