@@ -139,6 +139,8 @@ typedef struct {
 
   GQueue scan_object_queue;
   GSource *idle_src;
+
+  GHashTable *requested_refs_to_fetch;  /* (element-type OstreeCollectionRef utf8) */
 } OtPullData;
 
 typedef struct {
@@ -1322,6 +1324,165 @@ commitstate_is_partial (OtPullData   *pull_data,
 }
 
 static gboolean
+ensure_collection_ref_in_summary (GVariant   *summary,
+                                  const char *collection_id,
+                                  const char *ref)
+{
+  g_assert_nonnull (collection_id);
+  g_assert_nonnull (ref);
+
+  g_autoptr(GVariant) additional_metadata = NULL;
+  additional_metadata = g_variant_get_child_value (summary, 1);
+
+  const char *main_collection_id;
+  if (!g_variant_lookup (additional_metadata,
+                         OSTREE_SUMMARY_COLLECTION_ID,
+                         "&s",
+                         &main_collection_id))
+    main_collection_id = NULL;
+
+  gboolean check_main_collection;
+  check_main_collection = (g_strcmp0 (main_collection_id, collection_id) == 0);
+
+  if (check_main_collection)
+    {
+      g_autoptr(GVariant) refs = NULL;
+      gsize i, n;
+
+      refs = g_variant_get_child_value (summary, 0);
+      for (i = 0, n = g_variant_n_children (refs); i < n; i++)
+        {
+          const char *refname;
+          g_autoptr(GVariant) ref_v = g_variant_get_child_value (refs, i);
+
+          g_variant_get_child (ref_v, 0, "&s", &refname);
+          if (g_strcmp0 (refname, ref) == 0)
+            return TRUE;
+        }
+
+      return FALSE;
+    }
+
+  g_autoptr(GVariant) collection_map = NULL;
+  collection_map = g_variant_lookup_value (additional_metadata,
+                                           OSTREE_SUMMARY_COLLECTION_MAP,
+                                           G_VARIANT_TYPE ("a{sa(s(taya{sv}))}"));
+  if (collection_map != NULL)
+    {
+      GVariantIter collection_map_iter;
+      char *unpack_summary_collection_id;
+      GVariant *unpack_refs;
+
+      g_variant_iter_init (&collection_map_iter, collection_map);
+
+      while (g_variant_iter_next (&collection_map_iter,
+                                  "{&s@a(s(taya{sv}))}",
+                                  &unpack_summary_collection_id,
+                                  &unpack_refs))
+        {
+          gsize i, n;
+          g_autofree char *summary_collection_id = unpack_summary_collection_id;
+          g_autoptr(GVariant) refs = unpack_refs;
+
+          if (g_strcmp0 (summary_collection_id, collection_id) != 0)
+            continue;
+
+          for (i = 0, n = g_variant_n_children (refs); i < n; i++)
+            {
+              const char *refname;
+              g_autoptr(GVariant) ref_v = g_variant_get_child_value (refs, i);
+
+              g_variant_get_child (ref_v, 0, "&s", &refname);
+
+              if (g_strcmp0 (refname, ref) == 0)
+                  return TRUE;
+            }
+        }
+    }
+
+  return FALSE;
+}
+
+static char *
+get_remote_collection_id (OstreeRepo  *repo,
+                          const gchar *remote_name)
+{
+  g_autofree gchar *remote_collection_id = NULL;
+
+  /* TODO: This happens for local pulls, I guess we should assume no
+   * collection id for this case?
+   */
+  if (remote_name == NULL)
+    return NULL;
+
+  if (!ostree_repo_get_remote_option (repo, remote_name, "collection-id", NULL,
+                                      &remote_collection_id, NULL) ||
+      remote_collection_id == NULL)
+    return NULL;
+
+  return g_steal_pointer (&remote_collection_id);
+}
+
+static gboolean
+verify_collection_ref (OtPullData  *pull_data,
+                       GVariant    *commit,
+                       GError     **error)
+{
+  g_autofree char *remote_collection_id;
+  remote_collection_id = get_remote_collection_id (pull_data->repo,
+                                                   pull_data->remote_name);
+  if (remote_collection_id == NULL)
+    return TRUE;
+
+  g_autoptr(GVariant) metadata = NULL;
+  metadata = g_variant_get_child_value (commit, 0);
+
+  gboolean unpacked;
+  const char *collection_id;
+  const char *ref;
+  unpacked = g_variant_lookup (metadata,
+                               "ostree.commit.collection-ref",
+                               "(&s&s)",
+                               &collection_id,
+                               &ref);
+
+  if (!unpacked)
+    return glnx_throw (error,
+                       "expected commit metadata to have collection "
+                       "ref information, found none");
+
+  if ((collection_id == NULL) ||
+      (collection_id[0] == '\0') ||
+      (ref == NULL) ||
+      (ref[0] == '\0'))
+    return glnx_throw (error,
+                       "bad collection ref information in commit metadata");
+
+  if (!g_str_equal (collection_id, remote_collection_id))
+    return glnx_throw (error,
+                       "commit has collection id %s in metadata, "
+                       "while the remote it came from has collection id %s",
+                       collection_id, remote_collection_id);
+
+  g_autoptr(OstreeCollectionRef) collection_ref;
+  collection_ref = ostree_collection_ref_new (collection_id, ref);
+  if (!g_hash_table_contains (pull_data->requested_refs_to_fetch, collection_ref))
+    return glnx_throw (error,
+                       "commit has collection id %s and ref %s, "
+                       "which was not requested",
+                       collection_id, ref);
+
+  /* TODO: not sure about this step, if the summary is meant to be unsigned…
+   */
+  if (!ensure_collection_ref_in_summary (pull_data->summary, collection_id, ref))
+    return glnx_throw (error,
+                       "no collection id %s and ref %s in summary",
+                       collection_id, ref);
+
+  return TRUE;
+}
+
+static gboolean
 scan_commit_object (OtPullData         *pull_data,
                     const char         *checksum,
                     guint               recursion_depth,
@@ -1368,6 +1529,15 @@ scan_commit_object (OtPullData         *pull_data,
 
   if (!ostree_repo_load_commit (pull_data->repo, checksum, &commit, &commitstate, error))
     goto out;
+
+  if (pull_data->summary)
+    {
+      if (!verify_collection_ref (pull_data, commit, error))
+        {
+          g_prefix_error (error, "Commit %s collection ref verification: ", checksum);
+          goto out;
+        }
+    }
 
   /* If we found a legacy transaction flag, assume all commits are partial */
   is_partial = commitstate_is_partial (pull_data, commitstate);
@@ -3619,6 +3789,7 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
 
   if (pull_data->legacy_transaction_resuming)
     g_debug ("resuming legacy transaction");
+  pull_data->requested_refs_to_fetch = requested_refs_to_fetch;
 
   /* Initiate requests for explicit commit revisions */
   g_hash_table_iter_init (&hash_iter, commits_to_fetch);
@@ -5059,9 +5230,8 @@ check_remote_matches_collection_id (OstreeRepo  *repo,
 {
   g_autofree gchar *remote_collection_id = NULL;
 
-  if (!ostree_repo_get_remote_option (repo, remote_name, "collection-id", NULL,
-                                      &remote_collection_id, NULL) ||
-      remote_collection_id == NULL)
+  remote_collection_id = get_remote_collection_id (repo, remote_name);
+  if (remote_collection_id == NULL)
     return FALSE;
 
   return g_str_equal (remote_collection_id, collection_id);
