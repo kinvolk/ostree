@@ -4007,6 +4007,31 @@ out:
 }
 
 /**
+ * ostree_repo_sign_data:
+ * @self: Self
+ * @data: binary data to sign
+ * @key_id: Use this GPG key id
+ * @homedir: (allow-none): GPG home directory, or %NULL
+ * @out_signature: Location for GPG signature of the data
+ * @cancellable: A #GCancellable
+ * @error: a #GError
+ *
+ * Get a GPG signature for @data.
+ */
+gboolean
+ostree_repo_sign_data (OstreeRepo    *self,
+                       GBytes        *data,
+                       const gchar   *key_id,
+                       const gchar   *homedir,
+                       GBytes       **out_signature,
+                       GCancellable  *cancellable,
+                       GError       **error)
+{
+  return sign_data (self, data, key_id, homedir,
+                    out_signature, cancellable, error);
+}
+
+/**
  * ostree_repo_sign_commit:
  * @self: Self
  * @commit_checksum: SHA256 of given commit to sign

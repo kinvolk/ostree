@@ -21,6 +21,7 @@
 LIBOSTREE_2017.8 {
 global:
   ostree_validate_remote_name;
+  ostree_repo_sign_data;
 } LIBOSTREE_2017.7;
 
 /* Stub section for the stable release *after* this development one; don't

@@ -1165,6 +1165,15 @@ void ostree_repo_pull_default_console_progress_changed (OstreeAsyncProgress *pro
                                                         gpointer             user_data);
 
 _OSTREE_PUBLIC
+gboolean ostree_repo_sign_data (OstreeRepo    *self,
+                                GBytes        *data,
+                                const gchar   *key_id,
+                                const gchar   *homedir,
+                                GBytes       **out_signature,
+                                GCancellable  *cancellable,
+                                GError       **error);
+
+_OSTREE_PUBLIC
 gboolean ostree_repo_sign_commit (OstreeRepo     *self,
                                   const gchar    *commit_checksum,
                                   const gchar    *key_id,
