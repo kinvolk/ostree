@@ -1324,6 +1324,257 @@ commitstate_is_partial (OtPullData   *pull_data,
 }
 
 static gboolean
+ensure_collection_ref_in_summary (OtPullData  *pull_data,
+                                  const char *collection_id,
+                                  const char *ref)
+{
+  g_autoptr(GVariant) additional_metadata = NULL;
+  const char *main_collection_id;
+  gboolean check_main_collection;
+
+  g_assert_nonnull (collection_id);
+  g_assert_nonnull (ref);
+
+  additional_metadata = g_variant_get_child_value (pull_data->summary, 1);
+
+  if (!g_variant_lookup (additional_metadata,
+                         OSTREE_SUMMARY_COLLECTION_ID,
+                         "&s",
+                         &main_collection_id))
+    main_collection_id = NULL;
+
+  check_main_collection = (g_strcmp0 (main_collection_id, collection_id) == 0);
+
+  if (check_main_collection)
+    {
+      g_autoptr(GVariant) refs = NULL;
+      gsize i, n;
+
+      refs = g_variant_get_child_value (pull_data->summary, 0);
+      for (i = 0, n = g_variant_n_children (refs); i < n; i++)
+        {
+          const char *refname;
+          g_autoptr(GVariant) ref_v = g_variant_get_child_value (refs, i);
+
+          g_variant_get_child (ref_v, 0, "&s", &refname);
+          if (g_strcmp0 (refname, ref) == 0)
+            return TRUE;
+        }
+
+      return FALSE;
+    }
+
+  g_autoptr(GVariant) collection_map = NULL;
+  collection_map = g_variant_lookup_value (additional_metadata,
+                                           OSTREE_SUMMARY_COLLECTION_MAP,
+                                           G_VARIANT_TYPE ("a{sa(s(taya{sv}))}"));
+  if (collection_map != NULL)
+    {
+      GVariantIter collection_map_iter;
+      char *unpack_summary_collection_id;
+      GVariant *unpack_refs;
+
+      g_variant_iter_init (&collection_map_iter, collection_map);
+
+      while (g_variant_iter_loop (&collection_map_iter,
+                                  "{&s@a(s(taya{sv}))}",
+                                  &unpack_summary_collection_id,
+                                  &unpack_refs))
+        {
+          gsize i, n;
+          g_autofree char *summary_collection_id = unpack_summary_collection_id;
+          g_autoptr(GVariant) refs = unpack_refs;
+
+          if (g_strcmp0 (summary_collection_id, collection_id) != 0)
+            continue;
+
+          for (i = 0, n = g_variant_n_children (refs); i < n; i++)
+            {
+              const char *refname;
+              g_autoptr(GVariant) ref_v = g_variant_get_child_value (refs, i);
+
+              g_variant_get_child (ref_v, 0, "&s", &refname);
+
+              if (g_strcmp0 (refname, ref) == 0)
+                  return TRUE;
+            }
+        }
+    }
+
+  return FALSE;
+}
+
+static gboolean
+verify_collection_ref_tuple (OtPullData    *pull_data,
+                             const gchar   *pulled_commit_checksum,
+                             GVariant      *collection_ref_tuple,
+                             GVariant      *collection_ref_tuple_sigs,
+                             GCancellable  *cancellable,
+                             GError       **error)
+{
+  const char *commit_checksum;
+  guint64 timestamp;
+  const char *collection_id;
+  const char *ref;
+
+  g_assert_nonnull (pull_data->summary);
+  g_assert_nonnull (collection_ref_tuple);
+  g_assert_nonnull (pulled_commit_checksum);
+
+  g_variant_get (collection_ref_tuple, "(&st&s&s)",
+                 &commit_checksum,
+                 &timestamp,
+                 &collection_id,
+                 &ref);
+  /* 1. check if commit checksum in the tuple is the same as the
+   * checksum variable
+   *
+   * 2. need to check the timestamp somehow (probably stash the old
+   * one and check if the new timestamp is greater than the stashed
+   * timestamp. or maybe there is some timestamp in the summary?
+   *
+   * 3. figure out what is the format of the collection id -> ref map
+   * in the summary.
+   *
+   * 4. ensure that the collection id we got in detached metadata is
+   * in the summary.
+   *
+   * 5. ensure that the ref we got in detached metadata is mapped to
+   * the collection id in the summary.
+   *
+   * 6. ensure that we can GPG verify the collection ref tuple.
+   */
+
+  if (commit_checksum == NULL ||
+      collection_id == NULL ||
+      ref == NULL)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "bad collection ref data in detached metadata for commit %s",
+                   pulled_commit_checksum);
+    }
+
+  if (g_strcmp0 (pulled_commit_checksum, commit_checksum) != 0)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "wrong commit checksum (%s) in commit %s detached metadata",
+                   commit_checksum, pulled_commit_checksum);
+      return FALSE;
+    }
+
+  /* TODO: check timestamp */
+
+  if (!ensure_collection_ref_in_summary (pull_data, collection_id, ref))
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "no collection id %s and ref %s in downloaded summary",
+                   collection_id, ref);
+      return FALSE;
+    }
+
+  g_autoptr(OstreeGpgVerifyResult) result = NULL;
+  g_autoptr(GBytes) tuple_data = g_variant_get_data_as_bytes (collection_ref_tuple);
+  g_autoptr(GByteArray) buffer = g_byte_array_new ();
+  GVariantIter sig_iter;
+  GVariant *unpack_child;
+
+  g_variant_iter_init (&sig_iter, collection_ref_tuple_sigs);
+  while ((unpack_child = g_variant_iter_next_value (&sig_iter)) != NULL)
+    {
+      g_autoptr(GVariant) child = unpack_child;
+      g_byte_array_append (buffer,
+                           g_variant_get_data (child),
+                           g_variant_get_size (child));
+    }
+  g_autoptr(GBytes) sig_data = g_byte_array_free_to_bytes (g_steal_pointer (&buffer));
+
+  result = ostree_repo_gpg_verify_data (pull_data->repo,
+                                        pull_data->remote_name,
+                                        tuple_data,
+                                        sig_data,
+                                        /* keyringdir: */ NULL,
+                                        /* extra keyring: */ NULL,
+                                        cancellable,
+                                        error);
+  if (!ostree_gpg_verify_result_require_valid_signature (result, error))
+    return FALSE;
+
+  return TRUE;
+}
+
+static gboolean
+uses_collection_ids (OtPullData *pull_data)
+{
+  g_autoptr(GVariant) additional_metadata = NULL;
+  const char *main_collection_id;
+
+  additional_metadata = g_variant_get_child_value (pull_data->summary, 1);
+
+  if (g_variant_lookup (additional_metadata, OSTREE_SUMMARY_COLLECTION_ID, "&s", &main_collection_id))
+    {
+      if (main_collection_id != NULL && main_collection_id[0] != '\0')
+        return TRUE;
+    }
+
+  g_autoptr(GVariant) collection_map = NULL;
+  collection_map = g_variant_lookup_value (additional_metadata,
+                                           OSTREE_SUMMARY_COLLECTION_MAP,
+                                           G_VARIANT_TYPE ("a{sa(s(taya{sv}))}"));
+
+  return collection_map != NULL;
+}
+
+static gboolean
+verify_collection_ref (OtPullData    *pull_data,
+                       const char    *checksum,
+                       GCancellable  *cancellable,
+                       GError       **error)
+{
+  g_autoptr(GVariant) metadata = NULL;
+  g_autoptr(GVariant) collection_ref_tuple = NULL;
+  g_autoptr(GVariant) collection_ref_tuple_sigs = NULL;
+  gboolean has_collection_id;
+
+  g_assert_nonnull (pull_data->summary);
+  g_assert_true (g_hash_table_contains (pull_data->fetched_detached_metadata, checksum));
+
+  if (!ostree_repo_read_commit_detached_metadata (pull_data->repo,
+                                                  checksum,
+                                                  &metadata,
+                                                  cancellable,
+                                                  error))
+    return FALSE;
+
+  collection_ref_tuple = g_variant_lookup_value (metadata, "ostree.commit.collection-ref", G_VARIANT_TYPE ("(stss)"));
+  collection_ref_tuple_sigs = g_variant_lookup_value (metadata, "ostree.commit.collection-ref-sigs", G_VARIANT_TYPE ("aay"));
+  has_collection_id = uses_collection_ids (pull_data);
+
+  if (collection_ref_tuple && collection_ref_tuple_sigs)
+    {
+      if (!has_collection_id)
+        return TRUE;
+
+      if (!verify_collection_ref_tuple (pull_data,
+                                        checksum,
+                                        collection_ref_tuple,
+                                        collection_ref_tuple_sigs,
+                                        cancellable,
+                                        error))
+        return FALSE;
+      /* TODO: gpg verify tuple and sigs */
+    }
+  else if (has_collection_id)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                   "expected commit %s to have collection metadata, found none",
+                   checksum);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static gboolean
 scan_commit_object (OtPullData         *pull_data,
                     const char         *checksum,
                     guint               recursion_depth,
@@ -1366,6 +1617,15 @@ scan_commit_object (OtPullData         *pull_data,
                                                      error);
       if (!process_verify_result (pull_data, checksum, result, error))
         goto out;
+    }
+
+  if (pull_data->summary)
+    {
+      if (!verify_collection_ref (pull_data, checksum, cancellable, error))
+        {
+          g_prefix_error (error, "Commit %s collection ref verification: ", checksum);
+          goto out;
+        }
     }
 
   if (!ostree_repo_load_commit (pull_data->repo, checksum, &commit, &commitstate, error))
